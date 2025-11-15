@@ -38,8 +38,8 @@ Planned items to add in the near future:
 
 **TODO**: Reusable writer goroutine (detailed)
 
-1. `**Goal:**` Provide a drop-in utility that runs a single goroutine responsible for writing to an io.Writer (or similar sink). The goroutine accepts write requests from multiple producers and handles batching, time-based flush, graceful shutdown, and error reporting.
-2. `**Why:**` Many applications need a safe, non-blocking way to perform I/O from multiple goroutines without flooding the writer or losing data during restarts/shutdowns.
+1. **`Goal:`** Provide a drop-in utility that runs a single goroutine responsible for writing to an io.Writer (or similar sink). The goroutine accepts write requests from multiple producers and handles batching, time-based flush, graceful shutdown, and error reporting.
+2. **`Why:`** Many applications need a safe, non-blocking way to perform I/O from multiple goroutines without flooding the writer or losing data during restarts/shutdowns.
 
 - **Acceptance criteria:**
 
