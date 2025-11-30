@@ -16,9 +16,10 @@ type SerializableString struct {
 	Value string
 }
 
-func (s SerializableString) Serialize() []byte {
+func (s *SerializableString) Serialize() []byte {
 	return []byte(s.Value)
 }
+
 
 // ---- New API in progress ---- will need to refactor tests
 type AsyncFileWriterConfig struct {
