@@ -12,14 +12,22 @@ import (
 	"github.com/sracha4355/GoStash/src/utils"
 )
 
+type SerializableString struct {
+	Value string
+}
+
+func (s SerializableString) Serialize() []byte {
+	return []byte(s.Value)
+}
+
 // ---- New API in progress ---- will need to refactor tests
 type AsyncFileWriterConfig struct {
 	WhenToFlush   int
 	FlushInterval time.Duration
 	SupressLogs   bool
-	Writer        *io.Writer
+	Writer        io.Writer
 }
-type AsyncFileWriter[T contracts.Serializable[T]] struct {
+type AsyncFileWriter[T contracts.Serializable] struct {
 	wg           *sync.WaitGroup
 	InputChannel <-chan T
 	ErrorChannel chan<- error
@@ -28,27 +36,29 @@ type AsyncFileWriter[T contracts.Serializable[T]] struct {
 	Config       AsyncFileWriterConfig
 }
 
-func (w *AsyncFileWriter[T]) NewAsyncFileWriter(
+func NewAsyncFileWriterr[T contracts.Serializable](
 	__when_to_flush__ int,
 	__flush_interval__ time.Duration,
 	__supress_logs__ bool,
-	__writer__ *io.Writer,
+	__writer__ io.Writer,
 	__input_channel__ <-chan T,
 	__error_channel__ chan<- error,
 	__done_channel__ <-chan struct{},
 	__ctx__ context.Context,
 	__waitgroup__ *sync.WaitGroup,
-) {
-	w.wg = __waitgroup__
-	w.InputChannel = __input_channel__
-	w.ErrorChannel = __error_channel__
-	w.DoneChannel = __done_channel__
-	w.Ctx = __ctx__
-	w.Config = AsyncFileWriterConfig{
-		WhenToFlush:   __when_to_flush__,
-		FlushInterval: __flush_interval__,
-		SupressLogs:   __supress_logs__,
-		Writer:        __writer__,
+) *AsyncFileWriter[T] {
+	return &AsyncFileWriter[T]{
+		wg:           __waitgroup__,
+		InputChannel: __input_channel__,
+		ErrorChannel: __error_channel__,
+		DoneChannel:  __done_channel__,
+		Ctx:          __ctx__,
+		Config: AsyncFileWriterConfig{
+			WhenToFlush:   __when_to_flush__,
+			FlushInterval: __flush_interval__,
+			SupressLogs:   __supress_logs__,
+			Writer:        __writer__,
+		},
 	}
 }
 
@@ -62,7 +72,7 @@ func (afw *AsyncFileWriter[T]) Run() {
 	}
 
 	// -- pass value for buz size later
-	w := bufio.NewWriter(*internals.Writer)
+	w := bufio.NewWriter(internals.Writer)
 	ticker := time.NewTicker(internals.FlushInterval)
 	defer func() {
 		_ = w.Flush()
@@ -160,7 +170,7 @@ func (afw *AsyncFileWriter[T]) __flush__(
 		return fmt.Errorf("failed to flush: %w", err)
 	}
 	if !afw.Config.SupressLogs {
-		utils.LogWithContext(utils.Info{}, "Successfully flushed %d bytes", w.Buffered())
+		utils.LogWithContext(utils.Info{}, "Successfully flushed")
 	}
 	return nil
 }

@@ -1,6 +1,6 @@
 package contracts
-type Serializable[T any] interface {
+type Serializable interface {
 	Serialize() ([]byte)
-	SafeSerialize() ([]byte, error) 
+	Len() int
 }
 
