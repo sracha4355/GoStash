@@ -12,12 +12,6 @@ import (
 	"github.com/barweiss/go-tuple"
 )
 
-const (
-	CHROME_DRIVER_PATH = "/opt/homebrew/bin/chromedriver"
-	PORT               = 9515
-	URL                = "https://www.capitoltrades.com"
-)
-
 type Fatal struct{}
 type Info struct{}
 type Debug struct{}
