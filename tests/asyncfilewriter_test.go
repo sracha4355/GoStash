@@ -4,14 +4,13 @@ package tests
 import (
 	"context"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
-	"github.com/sracha4355/GoStash/src/contracts"
 	"github.com/sracha4355/GoStash/src/routines"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,19 +34,20 @@ import (
 //   need to test we do not get stuck in the for loop
 // */
 
-// ---- helper methods for testing
-func launchProducers[T contracts.Serializable](
+// ---- Testing Helpers ---- //
+func launchProducers(
 	nProducers,
 	nPayloads int,
 	bytesWritten *atomic.Int64,
-	payload T,
+	payload routines.SerializableString,
 	ctx context.Context,
 	wg *sync.WaitGroup,
-	inputChannel chan T,
+	inputChannel chan routines.SerializableString,
 ) {
 	for i := 0; i < nProducers; i++ {
 		wg.Add(1)
 		go func() {
+			n := nPayloads
 			defer wg.Done()
 			for {
 				select {
@@ -55,18 +55,17 @@ func launchProducers[T contracts.Serializable](
 					goto done
 				case inputChannel <- payload:
 					bytesWritten.Add(int64(payload.Len()))
-					nPayloads--
-					if nPayloads == 0 {
+					n--
+					if n == 0 {
 						goto done
 					}
 				}
 			}
 		done:
-			return
 		}()
 	}
 }
-func assertAllBytesWritten(suite *routineTestSuite[routines.SerializableString]) {
+func assertAllBytesWritten(suite *routineTestSuite) {
 	//---- Assert
 	suite.file.Seek(0, io.SeekStart)
 	buf, err := io.ReadAll(suite.file)
@@ -78,64 +77,75 @@ func assertAllBytesWritten(suite *routineTestSuite[routines.SerializableString])
 	)
 }
 
-/**
-TODO:
-- unittests for writer goroutine
-*/
+//-------------------------------------------------------//
 
-// Define the suite, and absorb the built-in basic suite
-// functionality from testify - including a T() method which
-// returns the current testing context
-type routineTestSuite[T contracts.Serializable] struct {
+type routineTestSuite struct {
 	suite.Suite
-
-	FileWriterConfig routines.AsyncFileWriterConfig
-	file             *os.File
-
+	afw  *routines.AsyncFileWriter[routines.SerializableString]
+	file *os.File
 	//---- concurrency needs
 	producerWdg   sync.WaitGroup
 	fileWriterWdg sync.WaitGroup
 	ctx           context.Context
 	cancel        context.CancelFunc
-	InputChannel  chan T
-	ErrorChannel  chan error
-	DoneChannel   chan struct{}
+	bytesWritten  atomic.Int64
 
-	supressLogs  bool
-	bytesWritten atomic.Int64
+	InputChannelClosed bool
+	ErrorChannelClosed bool
+	DoneChannelClosed  bool
+	InputChannel       chan routines.SerializableString
+	ErrorChannel       chan error
+	DoneChannel        chan struct{}
 }
 
-func (suite *routineTestSuite[routines.SerializableString]) SetupTest() {
+func (suite *routineTestSuite) SetupTest() {
 	dir := suite.T().TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
 	filePath := filepath.Join(dir, "write-here.txt")
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
 	require.NoError(suite.T(), err)
-	suite.FileWriterConfig = routines.AsyncFileWriterConfig{
-		WhenToFlush:   5,
-		FlushInterval: time.Millisecond * 200,
-		SupressLogs:   false,
-		Writer:        file,
-	}
+
+	suite.cancel = cancel
+	suite.ctx = ctx
 	suite.file = file
-	suite.ctx, suite.cancel = context.WithCancel(context.Background())
-	suite.wdg = sync.WaitGroup{}
-	suite.supressLogs = false
+	suite.fileWriterWdg = sync.WaitGroup{}
+	suite.producerWdg = sync.WaitGroup{}
 	IBUF := 5
 	EBUF := 5
-	suite.InputChannel = make(chan string, IBUF)
+	suite.InputChannel = make(chan routines.SerializableString, IBUF)
 	suite.ErrorChannel = make(chan error, EBUF)
 	suite.DoneChannel = make(chan struct{})
+	suite.afw = &routines.AsyncFileWriter[routines.SerializableString]{
+		Wg:           &suite.fileWriterWdg,
+		InputChannel: suite.InputChannel,
+		ErrorChannel: suite.ErrorChannel,
+		DoneChannel:  suite.DoneChannel,
+		Ctx:          ctx,
+		Config: routines.AsyncFileWriterConfig{
+			WhenToFlush:   5,
+			FlushInterval: time.Millisecond * 200,
+			SupressLogs:   false,
+			Writer:        file,
+		},
+	}
+	suite.InputChannelClosed = true
+	suite.ErrorChannelClosed = true
+	suite.DoneChannelClosed = true
+
 }
 
 // ---- clean up after each test
-func (suite *routineTestSuite[routines.SerializableString]) TearDownTest() {
+func (suite *routineTestSuite) TearDownTest() {
 	if suite.cancel != nil {
 		suite.cancel()
 	}
 	if suite.file != nil {
 		suite.file.Close()
 	}
-	close(suite.DoneChannel)
+	if !suite.DoneChannelClosed {
+		close(suite.DoneChannel)
+	}
+
 	close(suite.InputChannel)
 	close(suite.ErrorChannel)
 	suite.bytesWritten.And(0)
@@ -145,7 +155,8 @@ func (suite *routineTestSuite) TestWriteToFileWithMultipleProducers() {
 	//---- Arrange
 	var producerWG sync.WaitGroup
 	PAYLOAD := routines.SerializableString{Value: "link\n"}
-	supressLogs := suite.supressLogs
+	// fmt.Printf("%d",PAYLOAD.Len())
+	suite.afw.Config.SupressLogs = false
 	GO_ROUTINES := 5
 	NUMLINKS_TO_SEND_PER_PRODUCER := 5
 	launchProducers(
@@ -158,50 +169,23 @@ func (suite *routineTestSuite) TestWriteToFileWithMultipleProducers() {
 		suite.InputChannel,
 	)
 
-	suite.wdg.Add(1)
-	go routines.WriteToFile(
-		&suite.wdg,
-		suite.pipeline.LinkChannel(),
-		suite.pipeline.ErrorChannel(),
-		suite.ctx,
-		suite.flushSize,
-		suite.flushInterval,
-		suite.file,
-		supressLogs,
-	)
+	suite.fileWriterWdg.Add(1)
+	go suite.afw.Run()
 	//----  writers
-	go func() {
-		for __err__ := range suite.pipeline.ErrorChannel() {
-			log.Printf("error from ErrorChannel %s", __err__.Error())
-			suite.cancel()
-		}
-	}()
-
-	for i := 0; i < GO_ROUTINES; i++ {
-		producerWG.Add(1)
-		go writer(
-			NUMLINKS_TO_SEND_PER_PRODUCER,
-			&producerWG,
-			suite.ctx,
-			suite.pipeline.LinkChannel(),
-			&suite.BYTES_WRITTEN,
-			PAYLOAD,
-		)
-	}
-
+	// go func() {
+	// 	for __err__ := range suite.ErrorChannel {
+	// 		log.Printf("error from ErrorChannel %s", __err__.Error())
+	// 		suite.cancel()
+	// 	}
+	// }()
 	producerWG.Wait()
-	suite.pipeline.Close()
-	suite.wdg.Wait()
-
-	//---- Assert
-	suite.file.Seek(0, io.SeekStart)
-	buf, err := io.ReadAll(suite.file)
-	require.NoError(suite.T(), err)
-	assert.Equal(
-		suite.T(),
-		suite.BYTES_WRITTEN.Load(),
-		int64(len(buf)),
-	)
+	close(suite.DoneChannel)
+	suite.fileWriterWdg.Wait()
+	// assert
+	assertAllBytesWritten(suite)
+}
+func TestExampleTestSuite(t *testing.T) {
+	suite.Run(t, new(routineTestSuite))
 }
 
 // func (suite *RoutineTestSuite) TestWriteToFileWithAWriterCancellationDuringOtherWrites() {

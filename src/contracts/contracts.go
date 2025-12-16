@@ -1,6 +1,8 @@
 package contracts
 type Serializable interface {
 	Serialize() ([]byte)
-	//Len() int
 }
 
+type Len interface {
+	Len() int
+}

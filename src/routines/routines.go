@@ -16,10 +16,13 @@ type SerializableString struct {
 	Value string
 }
 
-func (s *SerializableString) Serialize() []byte {
+func (s SerializableString) Serialize() []byte {
 	return []byte(s.Value)
 }
 
+func (s SerializableString) Len() int {
+	return len(s.Value)
+}
 
 // ---- New API in progress ---- will need to refactor tests
 type AsyncFileWriterConfig struct {
@@ -27,9 +30,13 @@ type AsyncFileWriterConfig struct {
 	FlushInterval time.Duration
 	SupressLogs   bool
 	Writer        io.Writer
+	itemsWritten  int
 }
-type AsyncFileWriter[T contracts.Serializable] struct {
-	wg           *sync.WaitGroup
+type AsyncFileWriter[T interface {
+	contracts.Serializable
+	contracts.Len
+}] struct {
+	Wg           *sync.WaitGroup
 	InputChannel <-chan T
 	ErrorChannel chan<- error
 	DoneChannel  <-chan struct{}
@@ -37,7 +44,10 @@ type AsyncFileWriter[T contracts.Serializable] struct {
 	Config       AsyncFileWriterConfig
 }
 
-func NewAsyncFileWriterr[T contracts.Serializable](
+func NewAsyncFileWriter[T interface {
+	contracts.Serializable
+	contracts.Len
+}](
 	__when_to_flush__ int,
 	__flush_interval__ time.Duration,
 	__supress_logs__ bool,
@@ -49,7 +59,7 @@ func NewAsyncFileWriterr[T contracts.Serializable](
 	__waitgroup__ *sync.WaitGroup,
 ) *AsyncFileWriter[T] {
 	return &AsyncFileWriter[T]{
-		wg:           __waitgroup__,
+		Wg:           __waitgroup__,
 		InputChannel: __input_channel__,
 		ErrorChannel: __error_channel__,
 		DoneChannel:  __done_channel__,
@@ -59,13 +69,14 @@ func NewAsyncFileWriterr[T contracts.Serializable](
 			FlushInterval: __flush_interval__,
 			SupressLogs:   __supress_logs__,
 			Writer:        __writer__,
+			itemsWritten:  0,
 		},
 	}
 }
 
 func (afw *AsyncFileWriter[T]) Run() {
 	defer func() {
-		afw.wg.Done()
+		afw.Wg.Done()
 	}()
 	var internals *AsyncFileWriterConfig = &afw.Config
 	if internals.WhenToFlush <= 0 {
@@ -84,6 +95,9 @@ func (afw *AsyncFileWriter[T]) Run() {
 	for {
 		select {
 		case <-afw.DoneChannel:
+			if !internals.SupressLogs {
+				utils.LogWithContext(utils.Info{}, "DoneChannel closed")
+			}
 			if errorWhileDraining := afw.__drain__(w); errorWhileDraining != nil {
 				utils.TrySendError(afw.ErrorChannel, errorWhileDraining, internals.SupressLogs)
 			}
@@ -110,19 +124,21 @@ func (afw *AsyncFileWriter[T]) Run() {
 				goto done
 			}
 			if !internals.SupressLogs {
-				utils.LogWithContext(utils.Info{}, "Received input (len=%d)", w.Size())
+				utils.LogWithContext(utils.Info{}, "Received input (len=%d)", internals.itemsWritten)
 			}
 			if errorWhileWriting := afw.__write__(item, w); errorWhileWriting != nil {
 				utils.TrySendError(afw.ErrorChannel, errorWhileWriting, internals.SupressLogs)
 				//---- Flush on failure
-				if errorWhileFlushing := afw.__flush__(w); errorWhileFlushing != nil {
-					utils.TrySendError(afw.ErrorChannel, errorWhileFlushing, internals.SupressLogs)
+				if internals.itemsWritten >= internals.WhenToFlush {
+					if errorWhileFlushing := afw.__flush__(w); errorWhileFlushing != nil {
+						utils.TrySendError(afw.ErrorChannel, errorWhileFlushing, internals.SupressLogs)
+					}
 				}
 				goto done
 			}
 		case <-ticker.C:
 			if !internals.SupressLogs {
-				utils.LogWithContext(utils.Info{}, "Ticker fired, flushing %d inputs", w.Size())
+				utils.LogWithContext(utils.Info{}, "Ticker fired, flushing %d inputs", internals.itemsWritten)
 			}
 			if errorWhileFlushing := afw.__flush__(w); errorWhileFlushing != nil {
 				utils.TrySendError(afw.ErrorChannel, errorWhileFlushing, internals.SupressLogs)
@@ -161,6 +177,7 @@ func (afw *AsyncFileWriter[T]) __write__(
 	if _, err := w.Write(input.Serialize()); err != nil {
 		return fmt.Errorf("write error: %w", err)
 	}
+	afw.Config.itemsWritten++
 	return nil
 }
 
@@ -170,6 +187,7 @@ func (afw *AsyncFileWriter[T]) __flush__(
 	if err := w.Flush(); err != nil {
 		return fmt.Errorf("failed to flush: %w", err)
 	}
+	afw.Config.itemsWritten = 0
 	if !afw.Config.SupressLogs {
 		utils.LogWithContext(utils.Info{}, "Successfully flushed")
 	}
