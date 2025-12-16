@@ -12,6 +12,19 @@ import (
 	"github.com/sracha4355/GoStash/src/utils"
 )
 
+// ---- ideas for things to add 
+// errgroup with backpressure
+// resuable worker pool
+// channel drainer
+// Atomic combo + wait group combo
+// FanIn Helper
+// Lifecycle-Owned Goroutine Manager
+// Close-Once Channel Wrapper
+// Context-Aware Semaphore
+// “Flush-on-Exit”
+// Singleflight-Lite
+// Restricted Channel where only certain goroutines can write
+
 type SerializableString struct {
 	Value string
 }
@@ -107,9 +120,18 @@ func (afw *AsyncFileWriter[T]) Run() {
 				utils.TrySendError(afw.ErrorChannel, errorWhileFlushing, internals.SupressLogs)
 			}
 			goto done
+		//---- Potential change from ctx to errgroup later
 		case <-afw.Ctx.Done():
 			if !internals.SupressLogs {
 				utils.LogWithContext(utils.Info{}, "Context cancellation occurred:%v", afw.Ctx.Err())
+			}
+			if errorWhileDraining := afw.__drain__(w); errorWhileDraining != nil {
+				utils.TrySendError(afw.ErrorChannel, errorWhileDraining, internals.SupressLogs)
+			}
+			//---- In the event of a drainage failure, we will still flush anything
+			//---- that already made it into bufio.Writer's internal buffer
+			if errorWhileFlushing := afw.__flush__(w); errorWhileFlushing != nil {
+				utils.TrySendError(afw.ErrorChannel, errorWhileFlushing, internals.SupressLogs)
 			}
 			goto done
 		case item, ok := <-afw.InputChannel:

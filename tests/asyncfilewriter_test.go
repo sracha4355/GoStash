@@ -1,4 +1,3 @@
-// Basic imports
 package tests
 
 import (
@@ -17,445 +16,276 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
-// /*
-// Test cases to write:
-// - routine shutting down if a writer to the fileWriter closes channel
-// DONE
-// - cancel ctx and writer then shutdowns properly
-// DONE
-// - Stress Test
-// - how writer handles when file perms don't work or file does not exist
-// DONE
-// - send exacty flushSize items
-// - send less than flushSize to test the ticker code
-// - remaining items are flushed after early channel closure
-// - test behavior with a full buffered channel
-// - New test case to write, the input channel is initally empty after the all writersDoneChannel is closed
-//   need to test we do not get stuck in the for loop
-// */
+// ----------------------
+// TEST SUITE
+// ----------------------
+type routineTestSuite struct {
+	suite.Suite
+	// Fields not covered by the Setup function
+	// payload    routines.SerializableString
+	// nProducers int
+	// nPayloads  int
+	// name       string
 
-// ---- Testing Helpers ---- //
-func launchProducers(
-	nProducers,
-	nPayloads int,
-	bytesWritten *atomic.Int64,
-	payload routines.SerializableString,
-	ctx context.Context,
-	wg *sync.WaitGroup,
-	inputChannel chan routines.SerializableString,
-) {
+	// Fields covered by the Setup function
+	file         *os.File
+	afw          *routines.AsyncFileWriter[routines.SerializableString]
+	bytesWritten atomic.Int64
+
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	producerWg   sync.WaitGroup
+	fileWriterWg sync.WaitGroup
+
+	inputChannel       chan routines.SerializableString
+	errorChannel       chan error
+	doneChannel        chan struct{}
+	inputChannelClosed bool
+	errorChannelClosed bool
+	doneChannelClosed  bool
+}
+
+// ----------------------
+// HELPER METHODS
+// ----------------------
+
+// Launch a number of producers sending `nPayloads` each
+func (suite *routineTestSuite) launchProducers(nProducers, nPayloads int, payload routines.SerializableString) {
 	for i := 0; i < nProducers; i++ {
-		wg.Add(1)
+		suite.producerWg.Add(1)
 		go func() {
-			n := nPayloads
-			defer wg.Done()
-			for {
+			defer suite.producerWg.Done()
+			for j := 0; j < nPayloads; j++ {
 				select {
-				case <-ctx.Done():
-					goto done
-				case inputChannel <- payload:
-					bytesWritten.Add(int64(payload.Len()))
-					n--
-					if n == 0 {
-						goto done
-					}
+				case <-suite.ctx.Done():
+					return
+				case suite.inputChannel <- payload:
+					suite.bytesWritten.Add(int64(payload.Len()))
 				}
 			}
-		done:
 		}()
 	}
 }
-func assertAllBytesWritten(suite *routineTestSuite) {
-	//---- Assert
+
+// Assert that all bytes sent were flushed to file
+func (suite *routineTestSuite) assertAllBytesWritten() {
 	suite.file.Seek(0, io.SeekStart)
 	buf, err := io.ReadAll(suite.file)
 	require.NoError(suite.T(), err)
-	assert.Equal(
-		suite.T(),
-		suite.bytesWritten.Load(),
-		int64(len(buf)),
-	)
+	assert.Equal(suite.T(), suite.bytesWritten.Load(), int64(len(buf)))
 }
 
-//-------------------------------------------------------//
-
-type routineTestSuite struct {
-	suite.Suite
-	afw  *routines.AsyncFileWriter[routines.SerializableString]
-	file *os.File
-	//---- concurrency needs
-	producerWdg   sync.WaitGroup
-	fileWriterWdg sync.WaitGroup
-	ctx           context.Context
-	cancel        context.CancelFunc
-	bytesWritten  atomic.Int64
-
-	InputChannelClosed bool
-	ErrorChannelClosed bool
-	DoneChannelClosed  bool
-	InputChannel       chan routines.SerializableString
-	ErrorChannel       chan error
-	DoneChannel        chan struct{}
-}
-
+// ----------------------
+// SETUP / TEARDOWN
+// ----------------------
 func (suite *routineTestSuite) SetupTest() {
+	// Temp file
 	dir := suite.T().TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
 	filePath := filepath.Join(dir, "write-here.txt")
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
+	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_RDWR, 0o644)
 	require.NoError(suite.T(), err)
+	suite.file = f
 
-	suite.cancel = cancel
-	suite.ctx = ctx
-	suite.file = file
-	suite.fileWriterWdg = sync.WaitGroup{}
-	suite.producerWdg = sync.WaitGroup{}
-	IBUF := 5
-	EBUF := 5
-	suite.InputChannel = make(chan routines.SerializableString, IBUF)
-	suite.ErrorChannel = make(chan error, EBUF)
-	suite.DoneChannel = make(chan struct{})
+	// Channels
+	IBUF, EBUF := 5, 5
+	suite.inputChannel = make(chan routines.SerializableString, IBUF)
+	suite.errorChannel = make(chan error, EBUF)
+	suite.doneChannel = make(chan struct{})
+	suite.inputChannelClosed = false
+	suite.errorChannelClosed = false
+	suite.doneChannelClosed = false
+
+	// Context
+	suite.ctx, suite.cancel = context.WithCancel(context.Background())
+
+	// AsyncFileWriter
 	suite.afw = &routines.AsyncFileWriter[routines.SerializableString]{
-		Wg:           &suite.fileWriterWdg,
-		InputChannel: suite.InputChannel,
-		ErrorChannel: suite.ErrorChannel,
-		DoneChannel:  suite.DoneChannel,
-		Ctx:          ctx,
+		Wg:           &suite.fileWriterWg,
+		InputChannel: suite.inputChannel,
+		ErrorChannel: suite.errorChannel,
+		DoneChannel:  suite.doneChannel,
+		Ctx:          suite.ctx,
 		Config: routines.AsyncFileWriterConfig{
 			WhenToFlush:   5,
-			FlushInterval: time.Millisecond * 200,
-			SupressLogs:   false,
-			Writer:        file,
+			FlushInterval: 200 * time.Millisecond,
+			SupressLogs:   true,
+			Writer:        f,
 		},
 	}
-	suite.InputChannelClosed = true
-	suite.ErrorChannelClosed = true
-	suite.DoneChannelClosed = true
-
 }
 
-// ---- clean up after each test
 func (suite *routineTestSuite) TearDownTest() {
-	if suite.cancel != nil {
-		suite.cancel()
+	suite.cancel()
+	suite.file.Close()
+	if suite.inputChannelClosed == false {
+		close(suite.inputChannel)
 	}
-	if suite.file != nil {
-		suite.file.Close()
+	if suite.errorChannelClosed == false {
+		close(suite.errorChannel)
 	}
-	if !suite.DoneChannelClosed {
-		close(suite.DoneChannel)
+	if suite.doneChannelClosed == false {
+		close(suite.doneChannel)
 	}
-
-	close(suite.InputChannel)
-	close(suite.ErrorChannel)
-	suite.bytesWritten.And(0)
+	suite.bytesWritten.Store(0)
 }
 
-func (suite *routineTestSuite) TestWriteToFileWithMultipleProducers() {
-	//---- Arrange
-	var producerWG sync.WaitGroup
-	PAYLOAD := routines.SerializableString{Value: "link\n"}
-	// fmt.Printf("%d",PAYLOAD.Len())
-	suite.afw.Config.SupressLogs = false
-	GO_ROUTINES := 5
-	NUMLINKS_TO_SEND_PER_PRODUCER := 5
-	launchProducers(
-		GO_ROUTINES,
-		NUMLINKS_TO_SEND_PER_PRODUCER,
-		&suite.bytesWritten,
-		PAYLOAD,
-		suite.ctx,
-		&suite.producerWdg,
-		suite.InputChannel,
-	)
+// ----------------------
+// TESTS
+// ----------------------
+// func (suite *routineTestSuite) TestWriteToFileWithMultipleProducers() {
+// 	PAYLOAD := routines.SerializableString{Value: "link\n"}
+// 	GO_ROUTINES := 5
+// 	NUMLINKS_TO_SEND_PER_PRODUCER := 5
 
-	suite.fileWriterWdg.Add(1)
+// 	// Start writer
+// 	suite.fileWriterWg.Add(1)
+// 	go suite.afw.Run()
+
+// 	// Start producers
+// 	suite.launchProducers(GO_ROUTINES, NUMLINKS_TO_SEND_PER_PRODUCER, PAYLOAD)
+
+// 	// Wait for producers
+// 	suite.producerWg.Wait()
+
+// 	// Close input channel so writer can finish
+// 	close(suite.doneChannel)
+// 	suite.doneChannelClosed = true
+
+// 	// Wait for writer
+// 	suite.fileWriterWg.Wait()
+
+// 	// Assert
+// 	suite.assertAllBytesWritten()
+// }
+
+func (suite *routineTestSuite) TestsAsyncFileWriterStressTest() {
+	PAYLOAD := routines.SerializableString{Value: "stress\n"}
+	PRODUCERS := 1000
+	PAYLOADS_PER_PRODUCER := 1000
+
+	suite.afw.Config.WhenToFlush = 10000
+	suite.afw.Config.FlushInterval = 60 * time.Second
+	suite.afw.Config.SupressLogs = true
+
+	suite.fileWriterWg.Add(1)
 	go suite.afw.Run()
-	//----  writers
-	// go func() {
-	// 	for __err__ := range suite.ErrorChannel {
-	// 		log.Printf("error from ErrorChannel %s", __err__.Error())
-	// 		suite.cancel()
-	// 	}
-	// }()
-	producerWG.Wait()
-	close(suite.DoneChannel)
-	suite.fileWriterWdg.Wait()
-	// assert
-	assertAllBytesWritten(suite)
+
+	suite.launchProducers(PRODUCERS, PAYLOADS_PER_PRODUCER, PAYLOAD)
+	suite.producerWg.Wait()
+
+	close(suite.doneChannel)
+	suite.doneChannelClosed = true
+
+	suite.fileWriterWg.Wait()
+	suite.assertAllBytesWritten()
 }
-func TestExampleTestSuite(t *testing.T) {
+
+func (suite *routineTestSuite) TestSendExactlyFlushSizeItems() {
+	PAYLOAD := routines.SerializableString{Value: "x"}
+	suite.afw.Config.WhenToFlush = 10
+	suite.afw.Config.FlushInterval = 1000 * time.Hour
+
+	suite.fileWriterWg.Add(1)
+	go suite.afw.Run()
+
+	for i := 0; i < suite.afw.Config.WhenToFlush; i++ {
+		suite.inputChannel <- PAYLOAD
+		suite.bytesWritten.Add(int64(PAYLOAD.Len()))
+	}
+
+	close(suite.doneChannel)
+	suite.doneChannelClosed = true
+
+	suite.fileWriterWg.Wait()
+	suite.assertAllBytesWritten()
+}
+
+func (suite *routineTestSuite) TestLessThanFlushSizeUsesTicker() {
+	PAYLOAD := routines.SerializableString{Value: "tick"}
+
+	suite.afw.Config.WhenToFlush = 100
+	suite.afw.Config.FlushInterval = 30 * time.Millisecond
+
+	suite.fileWriterWg.Add(1)
+	go suite.afw.Run()
+
+	for i := 0; i < 3; i++ {
+		suite.inputChannel <- PAYLOAD
+		suite.bytesWritten.Add(int64(PAYLOAD.Len()))
+	}
+
+	time.Sleep(2 * suite.afw.Config.FlushInterval)
+
+	close(suite.doneChannel)
+	suite.doneChannelClosed = true
+
+	suite.fileWriterWg.Wait()
+	suite.assertAllBytesWritten()
+}
+
+func (suite *routineTestSuite) TestRemainingItemsFlushedOnEarlyClose() {
+	PAYLOAD := routines.SerializableString{Value: "drain\n"}
+
+	suite.fileWriterWg.Add(1)
+	go suite.afw.Run()
+
+	for i := 0; i < 1000; i++ {
+		suite.inputChannel <- PAYLOAD
+		suite.bytesWritten.Add(int64(PAYLOAD.Len()))
+	}
+
+	close(suite.inputChannel)
+	suite.inputChannelClosed = true
+
+	suite.fileWriterWg.Wait()
+	suite.assertAllBytesWritten()
+}
+
+func (suite *routineTestSuite) TestDoneClosedWithEmptyInputChannel() {
+	suite.fileWriterWg.Add(1)
+	go suite.afw.Run()
+
+	// No writes, close done immediately
+	close(suite.doneChannel)
+	suite.doneChannelClosed = true
+
+	done := make(chan struct{})
+	go func() {
+		suite.fileWriterWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// success
+	case <-time.After(500 * time.Millisecond):
+		suite.T().Fatal("writer stuck with empty input channel and done closed")
+	}
+}
+
+func (suite *routineTestSuite) TestFullBufferedChannel() {
+	PAYLOAD := routines.SerializableString{Value: "buf"}
+
+	suite.afw.Config.WhenToFlush = 2
+	suite.afw.Config.FlushInterval = 100 * time.Millisecond
+
+	suite.fileWriterWg.Add(1)
+	go suite.afw.Run()
+
+	// Fill channel buffer
+	for i := 0; i < cap(suite.inputChannel); i++ {
+		suite.inputChannel <- PAYLOAD
+		suite.bytesWritten.Add(int64(PAYLOAD.Len()))
+	}
+
+	close(suite.doneChannel)
+	suite.doneChannelClosed = true
+
+	suite.fileWriterWg.Wait()
+	suite.assertAllBytesWritten()
+}
+
+func TestRoutineTestSuite(t *testing.T) {
 	suite.Run(t, new(routineTestSuite))
 }
-
-// func (suite *RoutineTestSuite) TestWriteToFileWithAWriterCancellationDuringOtherWrites() {
-// 	//---- Arrange
-// 	var producerWG sync.WaitGroup
-// 	WRITER_GO_ROUTINES := 5
-// 	NUMLINKS_TO_SEND_PER_PRODUCER := 5
-// 	PAYLOAD := "link\n"
-
-// 	//---- Act
-// 	suite.wdg.Add(1)
-// 	go routines.WriteToFile(
-// 		&suite.wdg,
-// 		suite.pipeline.LinkChannel(),
-// 		suite.pipeline.ErrorChannel(),
-// 		suite.ctx,
-// 		suite.flushSize,
-// 		suite.flushInterval,
-// 		suite.file,
-// 		suite.supressLogs,
-// 	)
-
-// 	for i := 0; i < WRITER_GO_ROUTINES; i++ {
-// 		producerWG.Add(1)
-// 		go writer(
-// 			NUMLINKS_TO_SEND_PER_PRODUCER,
-// 			&producerWG,
-// 			suite.ctx,
-// 			suite.pipeline.LinkChannel(),
-// 			&suite.BYTES_WRITTEN,
-// 			PAYLOAD,
-// 		)
-// 	}
-// 	producerWG.Add(2)
-// 	//---- goroutine to purposely block until a cancel occurs
-// 	go func() {
-// 		defer producerWG.Done()
-// 		for range suite.ctx.Done() {
-// 			return
-// 		}
-// 	}()
-// 	go func() {
-// 		defer producerWG.Done()
-// 		time.Sleep(300 * time.Millisecond)
-// 		suite.cancel()
-// 	}()
-
-// 	producerWG.Wait()
-// 	suite.wdg.Wait()
-
-// 	//---- Assert
-// 	select {
-// 	case <-suite.ctx.Done():
-// 	default:
-// 		require.FailNow(suite.T(), "context should have been canceled")
-// 	}
-// }
-
-// func (suite *RoutineTestSuite) TestWriteToFileWhenLinkChannelGetsClosed() {
-// 	//---- Arrange
-// 	var producerWG sync.WaitGroup
-// 	WRITER_GO_ROUTINES := 5
-// 	NUMLINKS_TO_SEND_PER_PRODUCER := 5
-// 	PAYLOAD := "link"
-
-// 	//---- Act
-// 	suite.wdg.Add(1)
-// 	go routines.WriteToFile(
-// 		&suite.wdg,
-// 		suite.pipeline.LinkChannel(),
-// 		suite.pipeline.ErrorChannel(),
-// 		suite.ctx,
-// 		suite.flushSize,
-// 		suite.flushInterval,
-// 		suite.file,
-// 		suite.supressLogs,
-// 	)
-
-// 	for i := 0; i < WRITER_GO_ROUTINES; i++ {
-// 		producerWG.Add(1)
-// 		go writer(
-// 			NUMLINKS_TO_SEND_PER_PRODUCER,
-// 			&producerWG,
-// 			suite.ctx,
-// 			suite.pipeline.LinkChannel(),
-// 			&suite.BYTES_WRITTEN,
-// 			PAYLOAD,
-// 		)
-// 	}
-// 	producerWG.Wait()
-// 	producerWG.Add(1)
-// 	//---- goroutine to purposely block until a cancel occurs
-// 	go func() {
-// 		defer producerWG.Done()
-// 		suite.pipeline.Close()
-// 	}()
-// 	suite.wdg.Wait()
-// 	//---- Assert
-// 	suite.file.Seek(0, io.SeekStart)
-// 	buf, err := io.ReadAll(suite.file)
-// 	require.NoError(suite.T(), err)
-// 	assert.Equal(suite.T(), int(suite.BYTES_WRITTEN.Load()), len(buf))
-// }
-
-// func (suite *RoutineTestSuite) TestWriteToFileWhenInsufficentFilePerms() {
-// 	dir := suite.T().TempDir()
-// 	filePath := filepath.Join(dir, "no-write.txt")
-// 	nonWritableFile, err := os.OpenFile(filePath, os.O_CREATE, 0o444) // read-only permissions
-// 	require.NoError(suite.T(), err)
-
-// 	suite.wdg.Add(1)
-// 	go routines.WriteToFile(
-// 		&suite.wdg,
-// 		suite.pipeline.LinkChannel(),
-// 		suite.pipeline.ErrorChannel(),
-// 		suite.ctx,
-// 		suite.flushSize,
-// 		suite.flushInterval,
-// 		nonWritableFile,
-// 		suite.supressLogs,
-// 	)
-// 	suite.wdg.Wait()
-// 	for __err__ := range suite.pipeline.ErrorChannel() {
-// 		log.Println(__err__.Error())
-// 		suite.pipeline.Close()
-// 	}
-// }
-
-// func (suite *RoutineTestSuite) TestWriteToFileSendingLessThanFlushSizeItems() {
-// 	//---- Arrange
-// 	WRITER_GO_ROUTINES := 1
-// 	NUMLINKS_TO_SEND_PER_PRODUCER := 1000
-// 	suite.flushSize = NUMLINKS_TO_SEND_PER_PRODUCER + 1
-// 	PAYLOAD := "link\n"
-// 	suite.pipeline.Close()
-// 	pipeline := webdriver.NewPipeline(1000, 3)
-// 	suite.pipeline = &pipeline
-
-// 	//---- Act
-// 	suite.wdg.Add(1)
-// 	go routines.WriteToFile(
-// 		&suite.wdg,
-// 		suite.pipeline.LinkChannel(),
-// 		suite.pipeline.ErrorChannel(),
-// 		suite.ctx,
-// 		suite.flushSize,
-// 		suite.flushInterval,
-// 		suite.file,
-// 		suite.supressLogs,
-// 	)
-
-// 	var producerWG sync.WaitGroup
-// 	for i := 0; i < WRITER_GO_ROUTINES; i++ {
-// 		producerWG.Add(1)
-// 		go writer(
-// 			NUMLINKS_TO_SEND_PER_PRODUCER,
-// 			&producerWG,
-// 			suite.ctx,
-// 			suite.pipeline.LinkChannel(),
-// 			&suite.BYTES_WRITTEN,
-// 			PAYLOAD,
-// 		)
-// 	}
-
-// 	producerWG.Wait()
-// 	suite.pipeline.Close()
-// 	suite.wdg.Wait()
-
-// 	//---- Assert
-// 	suite.file.Seek(0, io.SeekStart)
-// 	buf, err := io.ReadAll(suite.file)
-// 	require.NoError(suite.T(), err)
-// 	assert.Equal(suite.T(), int(suite.BYTES_WRITTEN.Load()), len(buf))
-// }
-// func (suite *RoutineTestSuite) TestWriteToFileSendingExactlyFlushSizeItems() {
-// 	//---- Arrange
-// 	WRITER_GO_ROUTINES := 5
-// 	NUMLINKS_TO_SEND_PER_PRODUCER := 1000
-// 	suite.flushSize = NUMLINKS_TO_SEND_PER_PRODUCER * WRITER_GO_ROUTINES
-// 	suite.flushInterval = 30 * time.Second
-// 	PAYLOAD := "link\n"
-
-// 	//---- Act
-// 	suite.wdg.Add(1)
-// 	go routines.WriteToFile(
-// 		&suite.wdg,
-// 		suite.pipeline.LinkChannel(),
-// 		suite.pipeline.ErrorChannel(),
-// 		suite.ctx,
-// 		suite.flushSize,
-// 		suite.flushInterval,
-// 		suite.file,
-// 		suite.supressLogs,
-// 	)
-
-// 	var producerWG sync.WaitGroup
-// 	for i := 0; i < WRITER_GO_ROUTINES; i++ {
-// 		producerWG.Add(1)
-// 		go writer(
-// 			NUMLINKS_TO_SEND_PER_PRODUCER,
-// 			&producerWG,
-// 			suite.ctx,
-// 			suite.pipeline.LinkChannel(),
-// 			&suite.BYTES_WRITTEN,
-// 			PAYLOAD,
-// 		)
-// 	}
-
-// 	producerWG.Wait()
-// 	suite.cancel()
-// 	suite.wdg.Wait()
-
-// 	//---- Assert
-// 	suite.file.Seek(0, io.SeekStart)
-// 	buf, err := io.ReadAll(suite.file)
-// 	require.NoError(suite.T(), err)
-// 	assert.Equal(suite.T(), int(suite.BYTES_WRITTEN.Load()), len(buf))
-
-// }
-
-// func (suite *RoutineTestSuite) TestStressTestForWriteToFile() {
-// 	//---- Arrange
-// 	WRITER_GO_ROUTINES := 5
-// 	NUMLINKS_TO_SEND_PER_PRODUCER := 2000
-// 	PAYLOAD := "link\n"
-// 	suite.pipeline.Close()
-// 	pipeline := webdriver.NewPipeline(100, 3)
-// 	suite.pipeline = &pipeline
-// 	suite.flushSize = 200
-// 	suite.supressLogs = true
-// 	writingDone := make(chan struct{})
-
-// 	//---- Act
-// 	suite.wdg.Add(1)
-// 	go routines.WriteToFile(
-// 		&suite.wdg,
-// 		suite.pipeline.LinkChannel(),
-// 		suite.pipeline.ErrorChannel(),
-// 		writingDone,
-// 		suite.ctx,
-// 		suite.flushSize,
-// 		suite.flushInterval,
-// 		suite.file,
-// 		suite.supressLogs,
-// 	)
-
-// 	var producerWG sync.WaitGroup
-// 	for i := 0; i < WRITER_GO_ROUTINES; i++ {
-// 		producerWG.Add(1)
-// 		go writer(
-// 			NUMLINKS_TO_SEND_PER_PRODUCER,
-// 			&producerWG,
-// 			suite.ctx,
-// 			suite.pipeline.LinkChannel(),
-// 			&suite.BYTES_WRITTEN,
-// 			PAYLOAD,
-// 		)
-// 	}
-
-// 	producerWG.Wait()
-// 	close(writingDone)
-// 	suite.wdg.Wait()
-
-// 	//---- Assert
-// 	suite.file.Seek(0, io.SeekStart)
-// 	buf, err := io.ReadAll(suite.file)
-// 	require.NoError(suite.T(), err)
-// 	assert.Equal(suite.T(), int(suite.BYTES_WRITTEN.Load()), len(buf))
-// 	log.Printf("Test done")
-// }
-// func TestRoutingTestSuite(t *testing.T) {
-// 	suite.Run(t, new(RoutineTestSuite))
-// }
