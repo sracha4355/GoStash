@@ -101,8 +101,8 @@ func (afw *AsyncFileWriter[T]) Run() {
 	defer func() {
 		_ = w.Flush()
 		ticker.Stop()
-		}()
-		
+	}()
+
 	//---- Errors from helpers will bubble up to Run()
 	//---- TrySendError() will send it to the ErrorChannel in a best-effort fashion
 	for {
@@ -179,17 +179,26 @@ done:
 func (afw *AsyncFileWriter[T]) __drain__(
 	w *bufio.Writer,
 ) error {
-	if len(afw.InputChannel) != 0 {
-		for item := range afw.InputChannel {
+	itemsDrained := 0
+	for {
+		select {
+		case item, ok := <-afw.InputChannel:
+			if !ok {
+				utils.LogWithContext(
+					utils.Info{}, 
+					"during __drain__ the input channel closed after draining %d items",
+					 itemsDrained,
+				)
+				return nil
+			}
 			if err := afw.__write__(item, w); err != nil {
 				return err
 			}
-			if len(afw.InputChannel) == 0 {
-				break
-			}
+			itemsDrained++
+		default: // channel is empty
+			return nil
 		}
 	}
-	return nil
 }
 
 func (afw *AsyncFileWriter[T]) __write__(
@@ -197,7 +206,7 @@ func (afw *AsyncFileWriter[T]) __write__(
 	w *bufio.Writer,
 ) error {
 	if _, err := w.Write(input.Serialize()); err != nil {
-		utils.LogWithContext(utils.Info{}, "error while writing to buffer %w, flushing partially filled buffer", err)
+		utils.LogWithContext(utils.Info{}, "error while writing to buffer %v, flushing partially filled buffer", err)
 		if flushErr := afw.__flush__(w); flushErr != nil {
 			return fmt.Errorf("write error occurred, and an error in subsequent partial flush %w", flushErr)
 		}

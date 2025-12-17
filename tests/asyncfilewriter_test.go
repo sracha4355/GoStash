@@ -217,6 +217,26 @@ func (suite *routineTestSuite) TestRemainingItemsFlushedOnEarlyClose() {
 	suite.assertAllBytesWritten()
 }
 
+func (suite *routineTestSuite) TestAllItemsGetDrainedProperly() {
+	suite.fileWriterWg.Add(1)
+	go suite.afw.Run()
+	PAYLOAD := routines.SerializableString{Value: "drain\n"}
+	GO_ROUTINES, PAYLOADS_PER_PRODUCER := 1, 1
+
+	//---- set high values so no flush indicator or flush ticker interferes with draining
+	suite.afw.Config.WhenToFlush = 10000000000
+	suite.afw.Config.FlushInterval = 1000 * time.Hour
+
+	suite.launchProducers(GO_ROUTINES, PAYLOADS_PER_PRODUCER, PAYLOAD)
+	suite.producerWg.Wait()
+
+	close(suite.doneChannel)	
+	suite.doneChannelClosed = true
+
+	suite.fileWriterWg.Wait()
+	suite.assertAllBytesWritten()
+}
+
 func (suite *routineTestSuite) TestDoneClosedWithEmptyInputChannel() {
 	suite.fileWriterWg.Add(1)
 	go suite.afw.Run()
