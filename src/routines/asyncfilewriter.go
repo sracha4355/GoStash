@@ -12,7 +12,7 @@ import (
 	"github.com/sracha4355/GoStash/src/utils"
 )
 
-// ---- ideas for things to add 
+// ---- ideas for things to add
 // errgroup with backpressure
 // resuable worker pool
 // channel drainer
@@ -88,9 +88,8 @@ func NewAsyncFileWriter[T interface {
 }
 
 func (afw *AsyncFileWriter[T]) Run() {
-	defer func() {
-		afw.Wg.Done()
-	}()
+	defer afw.Wg.Done()
+
 	var internals *AsyncFileWriterConfig = &afw.Config
 	if internals.WhenToFlush <= 0 {
 		internals.WhenToFlush = 100
@@ -101,8 +100,9 @@ func (afw *AsyncFileWriter[T]) Run() {
 	ticker := time.NewTicker(internals.FlushInterval)
 	defer func() {
 		_ = w.Flush()
-	}()
-
+		ticker.Stop()
+		}()
+		
 	//---- Errors from helpers will bubble up to Run()
 	//---- TrySendError() will send it to the ErrorChannel in a best-effort fashion
 	for {
@@ -197,7 +197,11 @@ func (afw *AsyncFileWriter[T]) __write__(
 	w *bufio.Writer,
 ) error {
 	if _, err := w.Write(input.Serialize()); err != nil {
-		return fmt.Errorf("write error: %w", err)
+		utils.LogWithContext(utils.Info{}, "error while writing to buffer %w, flushing partially filled buffer", err)
+		if flushErr := afw.__flush__(w); flushErr != nil {
+			return fmt.Errorf("write error occurred, and an error in subsequent partial flush %w", flushErr)
+		}
+		return fmt.Errorf("write error occured %w", err)
 	}
 	afw.Config.itemsWritten++
 	return nil

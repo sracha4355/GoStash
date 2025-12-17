@@ -133,31 +133,6 @@ func (suite *routineTestSuite) TearDownTest() {
 // ----------------------
 // TESTS
 // ----------------------
-// func (suite *routineTestSuite) TestWriteToFileWithMultipleProducers() {
-// 	PAYLOAD := routines.SerializableString{Value: "link\n"}
-// 	GO_ROUTINES := 5
-// 	NUMLINKS_TO_SEND_PER_PRODUCER := 5
-
-// 	// Start writer
-// 	suite.fileWriterWg.Add(1)
-// 	go suite.afw.Run()
-
-// 	// Start producers
-// 	suite.launchProducers(GO_ROUTINES, NUMLINKS_TO_SEND_PER_PRODUCER, PAYLOAD)
-
-// 	// Wait for producers
-// 	suite.producerWg.Wait()
-
-// 	// Close input channel so writer can finish
-// 	close(suite.doneChannel)
-// 	suite.doneChannelClosed = true
-
-// 	// Wait for writer
-// 	suite.fileWriterWg.Wait()
-
-// 	// Assert
-// 	suite.assertAllBytesWritten()
-// }
 
 func (suite *routineTestSuite) TestsAsyncFileWriterStressTest() {
 	PAYLOAD := routines.SerializableString{Value: "stress\n"}
@@ -250,6 +225,7 @@ func (suite *routineTestSuite) TestDoneClosedWithEmptyInputChannel() {
 	close(suite.doneChannel)
 	suite.doneChannelClosed = true
 
+	// Channel used to test for writer completion
 	done := make(chan struct{})
 	go func() {
 		suite.fileWriterWg.Wait()
