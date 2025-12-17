@@ -12,15 +12,20 @@ import (
 	"github.com/barweiss/go-tuple"
 )
 
-const (
-	CHROME_DRIVER_PATH = "/opt/homebrew/bin/chromedriver"
-	PORT               = 9515
-	URL                = "https://www.capitoltrades.com"
-)
 
 type Fatal struct{}
 type Info struct{}
 type Debug struct{}
+type Pair[T any, V any] struct {
+	First  T
+	Second V
+}
+func NewPair[T any, V any](first T, second V) Pair[T, V] {
+	return Pair[T, V]{
+		First:  first,
+		Second: second,
+	}
+}
 
 func WaitXSeconds(X int) {
 	time.Sleep(time.Duration(X) * time.Second)
