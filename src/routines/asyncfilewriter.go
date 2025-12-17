@@ -184,11 +184,7 @@ func (afw *AsyncFileWriter[T]) __drain__(
 		select {
 		case item, ok := <-afw.InputChannel:
 			if !ok {
-				utils.LogWithContext(
-					utils.Info{}, 
-					"during __drain__ the input channel closed after draining %d items",
-					 itemsDrained,
-				)
+				utils.LogWithContext(utils.Info{}, "during __drain__ the input channel closed after draining %d items", itemsDrained)
 				return nil
 			}
 			if err := afw.__write__(item, w); err != nil {

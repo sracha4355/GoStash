@@ -20,6 +20,7 @@ type Pair[T any, V any] struct {
 	First  T
 	Second V
 }
+
 func NewPair[T any, V any](first T, second V) Pair[T, V] {
 	return Pair[T, V]{
 		First:  first,
