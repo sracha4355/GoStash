@@ -37,7 +37,11 @@ func (s SerializableString) Len() int {
 	return len(s.Value)
 }
 
-// ---- New API in progress ---- will need to refactor tests
+// AsyncFileWriterConfig controls batching, flush timing, and logging for AsyncFileWriter.
+//
+// WhenToFlush is the number of serialized items buffered before an automatic flush;
+// values <= 0 default to 100 in Run. FlushInterval triggers periodic flushes via a
+// ticker. SupressLogs disables informational logs. Writer receives flushed bytes.
 type AsyncFileWriterConfig struct {
 	WhenToFlush   int
 	FlushInterval time.Duration
@@ -45,6 +49,32 @@ type AsyncFileWriterConfig struct {
 	Writer        io.Writer
 	itemsWritten  int
 }
+// AsyncFileWriter batches values from InputChannel, serializes each item, and
+// writes through a buffered io.Writer. Run flushes when WhenToFlush items have
+// been written, when FlushInterval elapses, or during shutdown.
+//
+// Basic usage:
+//
+//	ctx, cancel := context.WithCancel(context.Background())
+//	defer cancel()
+//	input := make(chan SerializableString, 128)
+//	errs := make(chan error, 1)
+//	done := make(chan struct{})
+//	var wg sync.WaitGroup
+//	wg.Add(1)
+//	w := NewAsyncFileWriter(100, time.Second, false, os.Stdout, input, errs, done, ctx, &wg)
+//	go w.Run()
+//	input <- SerializableString{Value: "line\n"}
+//	close(input)
+//	wg.Wait()
+//
+// High throughput: use a large buffered input channel and a higher WhenToFlush
+// (for example 1000) so Run amortizes flush syscalls across many items.
+//
+// Shutdown: Run exits when DoneChannel is closed, the context is cancelled, or
+// InputChannel is closed. For DoneChannel and context cancellation, Run drains
+// any immediately available items from InputChannel, then flushes. Errors are
+// reported on ErrorChannel when possible.
 type AsyncFileWriter[T interface {
 	contracts.Serializable
 	contracts.Len
@@ -57,6 +87,8 @@ type AsyncFileWriter[T interface {
 	Config       AsyncFileWriterConfig
 }
 
+// NewAsyncFileWriter constructs an AsyncFileWriter. The caller must call Run in
+// a goroutine and increment Wg before starting (Wg.Done is deferred in Run).
 func NewAsyncFileWriter[T interface {
 	contracts.Serializable
 	contracts.Len
@@ -87,6 +119,8 @@ func NewAsyncFileWriter[T interface {
 	}
 }
 
+// Run processes InputChannel until shutdown. It flushes on batch size, ticker,
+// input close, DoneChannel, or context cancellation.
 func (afw *AsyncFileWriter[T]) Run() {
 	defer afw.Wg.Done()
 
